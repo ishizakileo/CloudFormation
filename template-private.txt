@@ -1,0 +1,700 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description:
+  LaunchTemplate & Network & server construction in AWS
+
+# to make the parameters easy to define and easy to see
+Metadata:
+  "AWS::CloudFormation::Interface":
+    ParameterGroups: 
+      - Label: 
+          default: "Specify the prefix of this project!"
+        Parameters: 
+          - PJPrefix
+      - Label:
+          default: "Specify availvality zones"
+        Parameters:
+          - AZPrameter1
+          - AZPrameter2
+      - Label: 
+          default: "Network Configuration!"
+        Parameters: 
+          - KeyName
+      - Label:
+          default: "DB Configuration!"
+        Parameters:
+          - DBInstanceName
+          - DBInstanceClass
+          - DBName
+# ------------------------------------------------------------#
+# Input Parameters
+# ------------------------------------------------------------# 
+Parameters:
+  PJPrefix:
+    Type: String
+    Default: "portfolio"
+    Description: "the PJPrefix should be specified the same with refering template."
+
+# this key is used to connect my instances using ssh.
+  KeyName:
+    Type: "AWS::EC2::KeyPair::KeyName"
+
+  AZPrameter1:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: "Enter another availability zone name. Default is ap-northeast-1a"
+
+  AZPrameter2:
+    Type: AWS::EC2::AvailabilityZone::Name
+    Description: "Enter another availability zone name. Default is ap-northeast-1c"
+
+  DBInstanceName:
+    Type: String
+    Default: "rds"
+    
+  DBInstanceClass:
+    Type: String
+    Default: "db.t3.micro"
+    
+  DBName:
+    Type: String
+    Default: "db"
+
+Resources: 
+# ------------------------------------------------------------#
+#  IAMRole
+# ------------------------------------------------------------#
+  EC2Role:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${PJPrefix}-SessionManager"
+      Description: "Allow the connections EC2 using the Session Manager"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+
+  InstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      Path: "/"
+      Roles: 
+        - !Ref EC2Role
+
+# ------------------------------------------------------------#
+#  VPC
+# ------------------------------------------------------------#
+  VPC: 
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+      # lounched instances in the vpc run shared hardware by default.
+      InstanceTenancy: default
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-vpc"
+
+# create IGW
+  InternetGateway: 
+    Type: "AWS::EC2::InternetGateway"
+    Properties: 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-igw"
+
+# attach above IGW to above VPC
+  InternetGatewayAttachment: 
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties: 
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC 
+
+# ------------------------------------------------------------#
+#  Subnet
+# ------------------------------------------------------------#     
+# Create the Public1 Subnet 
+  Public1Subnet: 
+    Type: "AWS::EC2::Subnet"
+    Properties: 
+      AvailabilityZone: !Ref AZPrameter1
+      CidrBlock: "10.0.0.0/24"
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-public1-subnet"
+
+# Create the Public2 Subnet 
+  Public2Subnet: 
+    Type: "AWS::EC2::Subnet"
+    Properties: 
+      AvailabilityZone: !Ref AZPrameter2
+      CidrBlock: "10.0.1.0/24"
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-public2-subnet"
+
+# Create the Private1 Subnet
+  Private1Subnet: 
+    Type: "AWS::EC2::Subnet"
+    Properties: 
+      AvailabilityZone: !Ref AZPrameter1
+      CidrBlock: "10.0.10.0/24"
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-private1-subnet"
+
+# Create the Private2 Subnet
+  Private2Subnet: 
+    Type: "AWS::EC2::Subnet"
+    Properties: 
+      AvailabilityZone: !Ref AZPrameter2
+      CidrBlock: "10.0.11.0/24"
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-private2-subnet"
+
+# ------------------------------------------------------------#
+#  NAT Gateway
+# ------------------------------------------------------------#
+  NATGateway: 
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      # specify the ID of ElasticIP(EIP) that is associated with the NAT Gateway.
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId 
+      SubnetId: !Ref Public1Subnet
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-natgw"
+  # Create the EIP for the NAT Gateway
+  NATGatewayEIP: 
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc  
+
+# ------------------------------------------------------------#
+#  RouteTable
+# ------------------------------------------------------------#          
+# Create the Public RouteTable
+  PublicRouteTable: 
+    Type: "AWS::EC2::RouteTable"
+    Properties: 
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-public1-route"
+
+# Create the Private RouteTable
+  PrivateRouteTable: 
+    Type: "AWS::EC2::RouteTable"
+    Properties: 
+      VpcId: !Ref VPC 
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-private1-route"
+
+# ------------------------------------------------------------#
+# Routing
+# ------------------------------------------------------------# 
+# Create the Public Routing
+  PublicRoute: 
+    Type: "AWS::EC2::Route"
+    Properties: 
+      RouteTableId: !Ref PublicRouteTable 
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway 
+
+# Create the Private Routing
+  PrivateRoute: 
+    Type: "AWS::EC2::Route"
+    Properties: 
+      RouteTableId: !Ref PrivateRouteTable 
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NATGateway 
+
+# ------------------------------------------------------------#
+# RouteTable Associate
+# ------------------------------------------------------------# 
+# Associate the PublicRouteTable to the PublicSubnet.
+  Public1SubnetRouteTableAssociation: 
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: 
+      SubnetId: !Ref Public1Subnet
+      RouteTableId: !Ref PublicRouteTable
+  Public2SubnetRouteTableAssociation: 
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: 
+      SubnetId: !Ref Public2Subnet
+      RouteTableId: !Ref PublicRouteTable
+
+# Associate the PrivateRouteTable to thePrivateSubnet.
+  Private1SubnetRouteTableAssociation: 
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: 
+      SubnetId: !Ref Private1Subnet
+      RouteTableId: !Ref PrivateRouteTable
+  Private2SubnetRouteTableAssociation: 
+    Type: "AWS::EC2::SubnetRouteTableAssociation"
+    Properties: 
+      SubnetId: !Ref Private2Subnet
+      RouteTableId: !Ref PrivateRouteTable
+
+# ------------------------------------------------------------#
+# SecurityGroup
+# ------------------------------------------------------------# 
+  WebServerSG:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupName: web-sg-cf
+      GroupDescription: the security group of my web server.
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${PJPrefix}-web-server-sg"
+
+  WebServerIngress1:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      # SSH communication use the 22port.
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      CidrIp: 0.0.0.0/0
+      GroupId: !GetAtt [ WebServerSG, GroupId ]
+
+  WebServerIngress2:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref ALBSecurityGroup
+      GroupId: !GetAtt [ WebServerSG, GroupId ] 
+
+  WebServerIngress3:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref RDSSecurityGroup
+      GroupId: !GetAtt [ WebServerSG, GroupId ]
+ 
+# ------------------------------------------------------------#
+# LaunchTemplate
+# ------------------------------------------------------------# 
+  EC2InstanceLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${PJPrefix}-web-server-template"
+      LaunchTemplateData:
+        # Specify the tag that is associated launched instances.
+        TagSpecifications:
+        # supported the value is instance or volume.
+        - ResourceType: instance
+          Tags:
+          - Key: Name
+            Value: !Sub "${PJPrefix}-web-server"
+        # attach the InstanceProfile.
+        IamInstanceProfile: 
+          Name: !Ref InstanceProfile
+        UserData:
+          Fn::Base64: |
+              #!/bin/bash
+              sudo yum -y update
+              sudo yum -y install httpd
+              sudo systemctl start httpd.service
+              sudo systemctl enable httpd.service
+              echo "<html><head><title>Test Page</title></head><body>Wellcome to `uname -n`.</body></html>" > /var/www/html/index.html
+        KeyName: !Ref KeyName
+        #ImageId: ami-01748a72bed07727c
+        # Amazon Linux
+        ImageId: ami-01b32aa8589df6208
+        InstanceType: t2.micro
+        NetworkInterfaces: 
+        # do not attach a public IP because using a ALB.
+        - AssociatePublicIpAddress: "false"
+          # Must specfy the location of the network interface in case NetworkInterfaces attribute use.
+          DeviceIndex: "0"
+          Groups:
+            - !Ref WebServerSG
+# ------------------------------------------------------------#
+#  Target Group
+# ------------------------------------------------------------#
+  TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties: 
+      VpcId: !Ref VPC
+      Name: !Sub "${PJPrefix}-tg"
+      # the protcol for routing targets
+      Protocol: HTTP
+      Port: 80
+      # the protcol for health check.
+      HealthCheckProtocol: HTTP
+      # the distination of health check.
+      # in case to install Apache to the instances, the[/] means [/var/www/html]
+      HealthCheckPath: "/"
+      # the port of the ALB when check health of instances.
+      HealthCheckPort: "traffic-port"
+      # the  health check number of cosecutive success times that regrad to be normal instances from abnormal istances.
+      HealthyThresholdCount: 2
+      # the failed consecutive nunber of health check that  instances is regraded abnormal.
+      UnhealthyThresholdCount: 2
+      # non-responce-time.
+      HealthCheckTimeoutSeconds: 5
+      # health check inteval of  each other instances.
+      HealthCheckIntervalSeconds: 10
+      # use fllowing http code when validate the response from the target group. 
+      Matcher: 
+        HttpCode: 200
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-tg"
+
+# ------------------------------------------------------------#
+#  ALB　
+# ------------------------------------------------------------#
+  InternetALB: 
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties: 
+      Name: !Sub "${PJPrefix}-alb"
+      Tags: 
+        - Key: Name
+          Value: !Sub "${PJPrefix}-alb"
+      # set specifically for using internet
+      Scheme: "internet-facing"    
+      # attirbute of this ALB
+      LoadBalancerAttributes:
+        # indicate whether deletion protection is enable(here is default).
+        - Key: "deletion_protection.enabled"
+          Value: false
+          # value of idle timeout(here is default)
+        - Key: "idle_timeout.timeout_seconds"
+          Value: 60
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      # starting subnet
+      Subnets: 
+        - !Ref Public1Subnet
+        - !Ref Public2Subnet
+
+  ALBListener: 
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties: 
+      DefaultActions:
+        - TargetGroupArn: !Ref TargetGroup
+          # type of rule action
+          # specify forward to send requests specifed target group,
+          Type: forward
+      LoadBalancerArn: !Ref InternetALB
+      Port: 80
+      Protocol: HTTP
+
+  # Security Group of InternetALB
+  ALBSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: !Sub "${PJPrefix}-alb-sg"
+      GroupDescription: "-"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${PJPrefix}-alb-sg"
+
+  # Inbound rules of ALBSecurityGroup
+  ALBSecurityGroupIngress: 
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties: 
+      # allow only access from the cloudfront
+      SourcePrefixListId: "{{resolve:secretsmanager:prefix:SecretString:prefix}}"
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      GroupId: !GetAtt [ ALBSecurityGroup, GroupId ]
+
+  # Outbound rules of ALBSecurityGroup
+  ALBSecurityGroupInress2: 
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties: 
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId: !Ref WebServerSG
+      GroupId: !GetAtt [ ALBSecurityGroup, GroupId ] 
+
+
+# ------------------------------------------------------------#
+# AutoScaling Group
+# ------------------------------------------------------------#    
+  AutoScalingGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AutoScalingGroupName: !Sub "${PJPrefix}-autoscalinggroup"
+      # specify starting subnet
+      VPCZoneIdentifier:
+        - !Ref Private1Subnet
+        - !Ref Private2Subnet
+      # starting template
+      LaunchTemplate:
+        # the ID of start template
+        LaunchTemplateId: !Ref 'EC2InstanceLaunchTemplate'
+        # the version number of starting template.
+        Version: !GetAtt 'EC2InstanceLaunchTemplate.LatestVersionNumber'
+
+      # specify Target Group for the ALB.
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      # starting number of ec2
+      DesiredCapacity: 2   
+      MaxSize: 2
+      MinSize: 2
+      # collect the metrics every 1 minute.
+      MetricsCollection:
+        - Granularity: 1Minute
+      # delete newest instance when the scaling out.
+      TerminationPolicies:
+        - NewestInstance
+      Tags:
+        - Key: Name
+          Value: !Sub "${PJPrefix}-server"
+          PropagateAtLaunch: true
+
+  ScalingPolicy:
+    Type: "AWS::AutoScaling::ScalingPolicy"
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        # allow scalein
+        DisableScaleIn: False
+        # scale the instances to maintain the CPU usage at 50%. 
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+
+
+# ------------------------------------------------------------#
+# S3
+# ------------------------------------------------------------# 
+  AccessLogBucket:
+    Type: "AWS::S3::Bucket"
+    #DeletionPolicy: Retain
+    Properties:
+      AccessControl: LogDeliveryWrite
+      BucketName: !Sub "${PJPrefix}-logbucket"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: false
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      # deny the bucket owners enforced setting for applying the ACLs
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
+         
+  BucketPolicy:
+    Type: "AWS::S3::BucketPolicy"
+    Properties:
+      Bucket: !Ref AccessLogBucket
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - "cloudfront.amazonaws.com"
+          Action:
+              - s3:*
+          Resource: !Sub "arn:aws:s3:::${AccessLogBucket}/*"
+
+# ------------------------------------------------------------#
+# CloudFront
+# ------------------------------------------------------------# 
+  CloudFront:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        Origins:
+        - DomainName: !GetAtt InternetALB.DNSName
+          Id: !Ref InternetALB
+          CustomOriginConfig:
+            HTTPPort: '80'
+        #    HTTPSPort: '443'
+            OriginProtocolPolicy: http-only
+        Enabled: 'true'
+        #HttpVersion: http2
+        Logging:
+          IncludeCookies: 'true'
+          Bucket: !GetAtt AccessLogBucket.DomainName
+          Prefix: Logs/cloudfront/
+        DefaultCacheBehavior:
+          TargetOriginId: !Ref InternetALB
+          SmoothStreaming: 'false'
+          # optimize the cache ratio
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          # allow only https
+          ViewerProtocolPolicy: https-only
+        PriceClass: PriceClass_200
+        # applly default certificate of the cloudfront.
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: 'true'
+
+# ------------------------------------------------------------#
+#  DBInstance MySQL
+# ------------------------------------------------------------#
+  RDSInstance:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      DBInstanceIdentifier: !Ref DBInstanceName
+      DBInstanceClass: !Ref DBInstanceClass
+      Engine: "mysql"
+      # supported version is 8.0 or version 5.7 in MySQL
+      EngineVersion: "8.0"
+      # set least value in gp2(汎用)
+      AllocatedStorage: 20
+      StorageType: "gp2"
+      DBName: !Ref DBName
+      MasterUsername: "{{resolve:secretsmanager:rds:SecretString:username}}"
+      # for security, the password is readed from Secret Manager.
+      # The way to register the password in Secret Manager is described below in the Output section.
+      # secret-id: set the value that is specified xxx in the output section.
+      # json-key: set the value that is specified yyy in th output section.
+      MasterUserPassword: "{{resolve:secretsmanager:rds:SecretString:password}}"
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      PubliclyAccessible: false
+      MultiAZ: true
+      AutoMinorVersionUpgrade: false
+      #DBParameterGroupName: !Ref DBParameterGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      CopyTagsToSnapshot: true
+      # the number of days for which automated buckups are retainedl.
+      BackupRetentionPeriod: 7
+      Tags:
+        - Key: "Name"
+          Value: !Ref DBInstanceName
+    # create a snapshot when the stack is deleted.
+    #DeletionPolicy: "Snapshot"
+
+  # ------------------------------------------------------------#
+  #  SecurityGroup for RDS (MySQL)
+  # ------------------------------------------------------------#
+  RDSSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: !Sub "${DBInstanceName}-sg"
+      GroupDescription: "-"
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${DBInstanceName}-sg"
+  # inbound Rules
+  RDSIngress:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      IpProtocol: tcp
+      FromPort: 3306
+      ToPort: 3306
+      SourceSecurityGroupId: !Ref WebServerSG
+      GroupId: !GetAtt [ RDSSecurityGroup, GroupId ] 
+
+  # ------------------------------------------------------------#
+  #  DBSubnetGroup
+  # ------------------------------------------------------------#
+  DBSubnetGroup:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupName: !Sub "${DBInstanceName}-subnet"
+      DBSubnetGroupDescription: "-"
+      SubnetIds:
+        - !Ref Private1Subnet
+        - !Ref Private2Subnet
+
+# ------------------------------------------------------------#
+# Output Parameters
+# ------------------------------------------------------------#                
+Outputs:
+# VPC
+  VPC:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub "${PJPrefix}-vpc"
+
+# Subnet
+  Public1Subnet:
+    Value: !Ref Public1Subnet
+    Export:
+      Name: !Sub "${PJPrefix}-public1-subnet"
+
+  Public2Subnet:
+    Value: !Ref Public2Subnet
+    Export:
+      Name: !Sub "${PJPrefix}-public2-subnet"
+
+  Private1Subnet:
+    Value: !Ref Private1Subnet
+    Export:
+      Name: !Sub "${PJPrefix}-private1-subnet"
+
+  Private2Subnet:
+    Value: !Ref Private2Subnet
+    Export:
+      Name: !Sub "${PJPrefix}-private2-subnet"
+
+# LaunchTemplate
+  EC2InstanceLaunchTemplate:
+    Value: !Ref EC2InstanceLaunchTemplate
+    Export:
+      Name: !Sub "${PJPrefix}-web1-server"
+# Target Group
+  TargetGroup:
+    Value: !Ref TargetGroup
+    Export:
+      Name: !Sub "${PJPrefix}-tg"
+# ALB
+  InternetALB:
+    Value: !Ref InternetALB
+    Export:
+      Name: !Sub "${PJPrefix}-alb"
+
+# Web-SG
+  WebServerSG:
+    Value: !Ref WebServerSG
+    Export :
+      Name: !Sub "${PJPrefix}-web-sg"
+
+  #DBInstance
+  DBInstanceID:
+    Value: !Ref RDSInstance
+    Export:
+      Name: !Sub "${DBInstanceName}-id"
+
+  DBInstanceEndpoint:
+    Value: !GetAtt RDSInstance.Endpoint.Address
+    Export:
+      Name: !Sub "${DBInstanceName}-endpoint"
+
+  DBName:
+    Value: !Ref DBName
+    Export:
+      Name: !Sub "${DBInstanceName}-dbname"
+
+# ------------------------------------------------------------#
+# The way to register password in Secret Manager using aws command
+# ------------------------------------------------------------#
+
+# Attension! remove the # when using fllowing command.
+
+# aws secretsmanager put-secret-value --secret-id xxx --secret-string '{"yyy":"Very-$seret-Data"}'
+
+
